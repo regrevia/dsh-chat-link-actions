@@ -61,7 +61,7 @@
     "url": "https://github.com/regrevia/dsh-chat-link-actions/issues"
   },
   "scripts": {
-    "test": "node --test test/index.test.js test/client-paths.test.js test/client-targets.test.js test/client-menu.test.js test/windows-shell.test.mjs",
+    "test": "node --test test/index.test.js test/client-paths.test.js test/client-targets.test.js test/client-menu.test.js test/client-correctness.test.js test/windows-shell.test.mjs",
     "check": "node --check index.js && node --check client.js && node --check cli.js",
     "win:test": "node scripts/win-node.mjs test",
     "win:info": "node scripts/win-node.mjs info",

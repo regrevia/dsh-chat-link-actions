@@ -339,7 +339,7 @@ test('附件卡片：同一条消息里的同名绝对路径就是这张卡片',
   assert.equal(paths.pathForCardName(card, '录屏 2026-02-11.mp4'), '/Users/example/videos/录屏 2026-02-11.mp4')
 })
 
-test('附件卡片：文件名对不上就不猜；同名出现两次取最近一条', () => {
+test('附件卡片：文件名对不上就不猜；同名出现两条路径也不猜', () => {
   const other = fakeNode('div', {}, { textContent: '另一次 [别的.mp4](/Users/example/videos/别的.mp4)' })
   const card = cardNode('录屏.mp4')
   nest(card, other); nest(other, body)
@@ -348,7 +348,8 @@ test('附件卡片：文件名对不上就不猜；同名出现两次取最近�
   const twice = fakeNode('div', {}, { textContent: '/tmp/旧/录屏.mp4 之后 /Users/example/新/录屏.mp4' })
   const twiceCard = cardNode('录屏.mp4')
   nest(twiceCard, twice); nest(twice, body)
-  assert.equal(paths.pathForCardName(twiceCard, '录屏.mp4'), '/Users/example/新/录屏.mp4')
+  /* 两条都同名时「取最近」是猜；猜错会打开错的文件，所以宁可不认。 */
+  assert.equal(paths.pathForCardName(twiceCard, '录屏.mp4'), null)
 })
 
 test('附件卡片：Windows 盘符上的同名文件也能对上', () => {

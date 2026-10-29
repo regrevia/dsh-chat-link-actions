@@ -138,7 +138,9 @@ window.__ModuleLoader__.load({
       request.span = before;
       var delivered = false;
       try {
-        delivered = sessionContext.emit("slash/input-insert-reference", request);
+        /* 宿主按第一个参数（作用域上下文）过滤监听器：只传事件名时请求会
+           落到所有打开的输入框，两个会话各挂一份草稿就一起被改。 */
+        delivered = sessionContext.emit(sessionContext, "slash/input-insert-reference", request);
       } catch (error) {
         return false;
       }
@@ -278,11 +280,16 @@ window.__ModuleLoader__.load({
       if (trimmed === "" || trimmed.charAt(0) === "#") return null;
       try {
         var url = new URL(trimmed, document.baseURI);
-        var fromQuery = normalizeCandidate(url.searchParams.get("path"));
-        if (fromQuery !== null) return { path: fromQuery, explicit: true };
-        for (var i = 0; i < ["file", "filepath", "abs", "target"].length; i += 1) {
-          var fromNamed = normalizeCandidate(url.searchParams.get(["file", "filepath", "abs", "target"][i]));
-          if (fromNamed !== null) return { path: fromNamed, explicit: true };
+        /* 同源的 `?path=` 才是宿主的文件路由；外站链接里的 path 参数只是
+           网址的一部分（`https://外站/open?path=/tmp/a.pdf` 不是本机文件）。 */
+        if (url.origin === location.origin) {
+          var fromQuery = normalizeCandidate(url.searchParams.get("path"));
+          if (fromQuery !== null) return { path: fromQuery, explicit: true };
+          var namedKeys = ["file", "filepath", "abs", "target"];
+          for (var i = 0; i < namedKeys.length; i += 1) {
+            var fromNamed = normalizeCandidate(url.searchParams.get(namedKeys[i]));
+            if (fromNamed !== null) return { path: fromNamed, explicit: true };
+          }
         }
         if (url.protocol === "file:") {
           var fromFile = decodeFileUri(trimmed);
@@ -465,7 +472,10 @@ window.__ModuleLoader__.load({
     var FIBER_KEY = /^__(?:reactFiber|reactInternalInstance)\$/;
 
     /** 可能带文件的属性名。 */
-    var PROP_KEYS = ["destination", "path", "absolutePath", "filePath", "localPath", "assetPath", "sourcePath", "src", "href"];
+    /* 磁盘字段与页面地址字段分开判：`src`/`href` 是页面地址，即使长得像
+       绝对路径（`/attachments/a.png`）也不是本机文件。 */
+    var PROP_DISK_KEYS = ["destination", "path", "absolutePath", "filePath", "localPath", "assetPath", "sourcePath"];
+    var PROP_KEYS = PROP_DISK_KEYS.concat(["src", "href"]);
     var PROP_CONTAINERS = ["file", "asset", "attachment", "source", "item"];
 
     /** Strip the line suffix a Markdown file link carries (`path#L12`). */
@@ -477,18 +487,26 @@ window.__ModuleLoader__.load({
     }
 
     /** Read the path a component's props carry, if any. */
+    function propPath(box, key) {
+      if (box === null || typeof box !== "object") return null;
+      var value = box[key];
+      if (PROP_DISK_KEYS.indexOf(key) >= 0) return normalizeCandidate(stripLineSuffix(value));
+      var found = hrefPath(stripLineSuffix(value));
+      return found !== null && found.explicit === true ? found.path : null;
+    }
+
     function pathFromProps(props) {
       if (props === null || typeof props !== "object") return null;
       for (var c = 0; c < PROP_CONTAINERS.length; c += 1) {
         var box = props[PROP_CONTAINERS[c]];
         if (box === null || typeof box !== "object") continue;
         for (var k = 0; k < PROP_KEYS.length; k += 1) {
-          var nested = normalizeCandidate(stripLineSuffix(box[PROP_KEYS[k]]));
+          var nested = propPath(box, PROP_KEYS[k]);
           if (nested !== null) return nested;
         }
       }
       for (var i = 0; i < PROP_KEYS.length; i += 1) {
-        var fromProp = normalizeCandidate(stripLineSuffix(props[PROP_KEYS[i]]));
+        var fromProp = propPath(props, PROP_KEYS[i]);
         if (fromProp !== null) return fromProp;
       }
       return null;
@@ -707,42 +725,70 @@ window.__ModuleLoader__.load({
       return plainLabel(card.textContent);
     }
 
-    /** 同一条消息里文件名对得上的绝对路径；对不上就返回 null，不猜。 */
+    /** 消息边界：同名文件只在本条消息里找，不跨到相邻消息去。 */
+    function messageRoot(node) {
+      for (var el = node; el !== null && el !== undefined && el !== document.body; el = el.parentElement) {
+        if (el.nodeType !== 1) continue;
+        if (typeof el.hasAttribute === "function" && el.hasAttribute("data-message-id")) return el;
+        var className = typeof el.className === "string" ? el.className : "";
+        if (/(?:^|[-_ ])message(?:[-_ ]|$)/i.test(className)) return el;
+        if (el.getAttribute("role") === "listitem" && el.parentElement !== null && el.parentElement !== document.body) {
+          var parentClass = typeof el.parentElement.className === "string" ? el.parentElement.className : "";
+          if (/message|turn|conversation/i.test(parentClass)) return el;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * 同一条消息里文件名对得上的绝对路径。对不上、或同名的有好几个不同
+     * 路径时返回 null：宁可让人自己选，也不能把相邻消息的文件当成这一个。
+     */
     function pathForCardName(card, name) {
       if (name === null || name === undefined) return null;
       var wanted = String(name).toLowerCase();
+      var bound = messageRoot(card);
       var scope = card;
+      var hits = [];
+      var note = function (candidate) {
+        if (candidate === null || candidate === undefined) return;
+        if (baseNameOf(candidate).toLowerCase() !== wanted) return;
+        if (hits.indexOf(candidate) === -1) hits.push(candidate);
+      };
       for (var depth = 0; depth < 8 && scope !== null && scope !== undefined && scope !== document.body; depth += 1) {
         if (typeof scope.querySelectorAll === "function") {
           var links = null;
           try { links = scope.querySelectorAll("a[href]"); } catch (ignored) { links = null; }
           if (links !== null) {
-            var fromLink = null;
             for (var link = 0; link < links.length && link < 200; link += 1) {
               var linkPath = null;
               try { linkPath = pathFromNode(links[link], null); } catch (ignored) { linkPath = null; }
-              if (linkPath !== null && baseNameOf(linkPath).toLowerCase() === wanted) fromLink = linkPath;
+              note(linkPath);
             }
-            if (fromLink !== null) return fromLink;
           }
         }
         var text = typeof scope.textContent === "string" ? scope.textContent : "";
         if (text !== "" && text.length <= 20000) {
           var matcher = new RegExp(PATH_IN_TEXT.source, "gu");
           var hit = null;
-          var found = null;
           while ((hit = matcher.exec(text)) !== null) {
             var captured = hit[1] === undefined ? hit[0] : hit[1];
-            var joined = joinPathWords(captured, text.slice(hit.index + hit[0].length));
-            var candidate = normalizeCandidate(joined.replace(/[)\]}>、。；：！？,;"'“”‘’]+$/u, ""), false);
-            if (candidate !== null && baseNameOf(candidate).toLowerCase() === wanted) found = candidate;
+            var tail = text.slice(hit.index + hit[0].length);
+            var joined = joinPathWords(captured, tail);
+            note(normalizeCandidate(joined.replace(/[)\]}>、。；：！？,;"'“”‘’]+$/u, ""), false));
+            /* 一行里并列写了两条路径时正则可能整段匹配，joinPathWords 只留
+               后一条；逐词再看一遍，两条都算候选，才判得出「同名不猜」。 */
+            var pieces = captured.split(/\s+/u);
+            for (var piece = 0; piece < pieces.length; piece += 1) {
+              note(normalizeCandidate(pieces[piece].replace(/[)\]}>、。；：！？,;"'“”‘’]+$/u, ""), false));
+            }
             if (hit[0].length === 0) matcher.lastIndex += 1;
           }
-          if (found !== null) return found;
         }
+        if (bound !== null && scope === bound) break;
         scope = scope.parentElement;
       }
-      return null;
+      return hits.length === 1 ? hits[0] : null;
     }
 
     /** 图片进剪贴板：粘贴出来就是图片，不再是那串文件名。 */
@@ -894,11 +940,11 @@ window.__ModuleLoader__.load({
         share: "发送到…",  // ui-copy-ignore
         shareFailed: "这台机器打不开系统分享",  // ui-copy-ignore
         customizeTitle: "自定义入口",  // ui-copy-ignore
-        valueHints: { shell: "命令，{path} 代表文件", app: "App 名字或路径", url: "链接，可用 {url}", share: "", shortcut: "快捷指令名字", service: "服务名" },  // ui-copy-ignore
+        valueHints: { shell: "命令，{path} 代表文件", powershell: "命令，{path} 代表文件", pwsh: "命令，{path} 代表文件", app: "App 名字或路径", url: "链接，可用 {url}", share: "", shortcut: "快捷指令名字", service: "服务名" },  // ui-copy-ignore
         scopeLabel: "适用于",  // ui-copy-ignore
         purposeLabel: "用途",  // ui-copy-ignore
         scopeWords: { all: "通用", video: "视频", audio: "音频", image: "图片", document: "文档", archive: "压缩包", code: "代码" },  // ui-copy-ignore
-        kindWords: { shell: "命令", app: "打开方式", shortcut: "快捷指令", url: "链接", share: "系统分享", service: "分享服务" },  // ui-copy-ignore
+        kindWords: { shell: "命令", powershell: "PowerShell 5", pwsh: "PowerShell 7", app: "打开方式", shortcut: "快捷指令", url: "链接", share: "系统分享", service: "分享服务" },  // ui-copy-ignore
         addKindEntry: "新增{kind}入口…",  // ui-copy-ignore
         addRow: "添加一行",  // ui-copy-ignore
         removeRow: "删除",  // ui-copy-ignore
@@ -933,11 +979,11 @@ window.__ModuleLoader__.load({
         share: "Send to…",  // ui-copy-ignore
         shareFailed: "System share is unavailable here",  // ui-copy-ignore
         customizeTitle: "Custom actions",  // ui-copy-ignore
-        valueHints: { shell: "Command; {path} is the file", app: "App name or path", url: "Link; {url} is the file URL", share: "", shortcut: "Shortcut name", service: "Service name" },  // ui-copy-ignore
+        valueHints: { shell: "Command; {path} is the file", powershell: "Command; {path} is the file", pwsh: "Command; {path} is the file", app: "App name or path", url: "Link; {url} is the file URL", share: "", shortcut: "Shortcut name", service: "Service name" },  // ui-copy-ignore
         scopeLabel: "Applies to",  // ui-copy-ignore
         purposeLabel: "Purpose",  // ui-copy-ignore
         scopeWords: { all: "All files", video: "Video", audio: "Audio", image: "Image", document: "Document", archive: "Archive", code: "Code" },  // ui-copy-ignore
-        kindWords: { shell: "Command", app: "Application", shortcut: "Shortcut", url: "Link", share: "System share", service: "Share service" },  // ui-copy-ignore
+        kindWords: { shell: "Command", powershell: "PowerShell 5", pwsh: "PowerShell 7", app: "Application", shortcut: "Shortcut", url: "Link", share: "System share", service: "Share service" },  // ui-copy-ignore
         addKindEntry: "New {kind} action…",  // ui-copy-ignore
         addRow: "Add row",  // ui-copy-ignore
         removeRow: "Remove",  // ui-copy-ignore
@@ -1294,7 +1340,16 @@ window.__ModuleLoader__.load({
 
 
     var SCOPE_ORDER = ["all", "video", "audio", "image", "document", "archive", "code"];
-    var PURPOSE_ORDER = ["app", "shell", "url", "share", "shortcut", "service"];
+    var PURPOSE_ORDER = ["app", "shell", "powershell", "pwsh", "url", "share", "shortcut", "service"];
+
+    /**
+     * 下拉框的当前值：清单里没有的 kind 也要原样留着。旧实现把不认识的值
+     * 一律改成 keys[0]，于是「打开编辑器再原样保存」把 powershell 写成了 app。
+     */
+    function pickerCurrent(value, keys) {
+      if (value === undefined || value === null || String(value) === "") return keys[0];
+      return String(value);
+    }
 
     /** 下拉用菜单样式，别落到系统原生列表。 */
     function editorPicker(className, label, keys, words, value) {
@@ -1303,7 +1358,7 @@ window.__ModuleLoader__.load({
       button.className = "dcla-pick " + className;
       button.setAttribute("aria-haspopup", "listbox");
       button.setAttribute("aria-label", label);
-      var current = keys.indexOf(value) >= 0 ? value : keys[0];
+      var current = pickerCurrent(value, keys);
       var text = document.createElement("span");
       var caret = document.createElement("span");
       caret.className = "dcla-caret";
@@ -1782,15 +1837,53 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 回执：成功结束；明确失败就提示；只有「不支持」才换后备通道。 */
+    function openedBy(result) {
+      if (result === true) return true;
+      if (result === null || result === undefined || typeof result !== "object") return false;
+      return result.ok === true || result.opened === true || result.revealed === true;
+    }
+
+    /** 明确的失败：抛了 error，或回执把 ok/opened/revealed 说成 false。 */
+    function explicitFailure(result, error) {
+      if (error !== null && error !== undefined) return describeReveal(null, error) || "error";
+      if (result === false) return "false";
+      if (result === null || result === undefined || typeof result !== "object") return null;
+      if (result.ok === false || result.opened === false || result.revealed === false) {
+        return describeReveal(result, null) || "failed";
+      }
+      return null;
+    }
+
+    /**
+     * 四种回执，各自的下一步是固定的：
+     * opened 结束；unsupported 换后备通道；failed 报错；pending 只提示、
+     * 不再开第二条通道（超时说明结果未知，不等于没执行）。
+     */
+    function revealVerdict(result, error) {
+      if (openedBy(result)) return "opened";
+      if (explicitFailure(result, error) !== null) {
+        return isUnsupported(result, error) ? "unsupported" : "failed";
+      }
+      /* 没有 ok/opened 字段但有 code/message 的回执也算有信息：能说不支持
+         就换通道，说不清就当结果未知。 */
+      if (isUnsupported(result, error)) return "unsupported";
+      return "pending";
+    }
+
     function afterReveal(path, result, error, attempt) {
       if (attempt.done) return;
-      if (isOpened(result)) {
+      var verdict = revealVerdict(result, error);
+      if (verdict === "opened") {
         finishAttempt(attempt);
         return;
       }
-      if (isUnsupported(result, error)) {
+      if (verdict === "unsupported") {
         revealViaRoute(path, attempt);
+        return;
+      }
+      if (verdict === "pending") {
+        report("reveal-pending " + path);
+        finishAttempt(attempt, strings().revealPending);
         return;
       }
       report("reveal-failed " + describeReveal(result, error));
@@ -1799,7 +1892,7 @@ window.__ModuleLoader__.load({
 
     function isUnsupported(result, error) {
       var text = describeReveal(result, error).toLowerCase();
-      if (text === "") return true;
+      if (text === "") return false;
       return /not[- ]?supported|unsupported|not[- ]?implemented|no such (?:method|function)|unknown (?:method|action)/.test(text);
     }
 
@@ -2055,6 +2148,12 @@ window.__ModuleLoader__.load({
     testSeams.kindOfName = kindOfName;
     testSeams.kindOfTarget = kindOfTarget;
     testSeams.menuEntriesFor = menuEntriesFor;
+    testSeams.revealVerdict = revealVerdict;
+    testSeams.insertChip = insertChip;
+    testSeams.PURPOSE_ORDER = function () { return PURPOSE_ORDER.slice(); };
+    testSeams.pickerCurrent = pickerCurrent;
+    testSeams.KIND_LIST = function () { return PURPOSE_ORDER.slice(); };
+    testSeams.setRootContext = function (value) { rootContext = value === undefined ? null : value; };
     module.exports = {};
     module.exports.inject = inject;
     module.exports.apply = apply;

@@ -291,29 +291,126 @@ export const CUSTOM_KINDS = ['shell', 'powershell', 'pwsh', 'app', 'shortcut', '
 export const CUSTOM_SCOPES = ['all', 'video', 'audio', 'image', 'document', 'archive', 'code']
 
 /**
+ * 一条入口的身份是 (label, scope)：同名可以分属不同类别，各自是独立的一条。
+ * 同名不同 scope 的两条不会互相覆盖，run 也不会替用户挑一条。
+ */
+export function actionIdentity(entry) {
+  return `${String(entry?.label ?? '')}\u0000${String(entry?.scope ?? 'all')}`
+}
+
+/**
+ * Check one entry without throwing, so a bad entry can be dropped on its own.
+ *
+ * `incomplete` is not an error: a half-filled row in the editor is simply not
+ * written yet. Everything else is a real contract violation — an unknown `kind`
+ * used to be silently read as `shell`, and an unknown `scope` as `all`, which
+ * turned a typo into a menu entry that ran something the user never asked for.
+ */
+export function checkCustomEntry(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'bad-shape' }
+  const label = String(raw.label ?? '').trim()
+  const payload = String(raw.value ?? raw.command ?? '').trim()
+  if (label === '') return { ok: false, error: 'incomplete' }
+  const rawKind = raw.kind === undefined || raw.kind === null ? 'shell' : String(raw.kind).trim()
+  if (!CUSTOM_KINDS.includes(rawKind)) return { ok: false, error: 'unknown-kind', detail: rawKind }
+  if (rawKind !== 'share' && payload === '') return { ok: false, error: 'incomplete' }
+  if (label.length > CUSTOM_LIMITS.label) return { ok: false, error: 'label-too-long', detail: String(label.length) }
+  if (payload.length > CUSTOM_LIMITS.value) return { ok: false, error: 'value-too-long', detail: String(payload.length) }
+  if (/[\u0000-\u001f]/u.test(label + payload)) return { ok: false, error: 'control-character' }
+  const rawScope = raw.scope === undefined || raw.scope === null ? 'all' : String(raw.scope).trim()
+  if (!CUSTOM_SCOPES.includes(rawScope)) return { ok: false, error: 'unknown-scope', detail: rawScope }
+  return { ok: true, entry: { label, kind: rawKind, value: payload, scope: rawScope } }
+}
+
+/** How many bad entries one load reports before it stops counting them. */
+const CUSTOM_WARNINGS = 5
+
+/**
+ * Sort one loaded value into `entries` plus a bounded list of problems. A bad
+ * entry is dropped alone: one typo must not throw away the rest of the menu.
+ */
+export function inspectCustomActions(value) {
+  const errors = []
+  let list = []
+  if (Array.isArray(value)) {
+    list = value
+  } else if (value !== null && typeof value === 'object' && Array.isArray(value.actions)) {
+    list = value.actions
+    errors.push({ index: -1, error: 'bad-shape', detail: '读到旧版的 { version, actions }，按 actions 收下' })
+  } else {
+    return { entries: [], errors: [{ index: -1, error: 'bad-shape', detail: '顶层不是数组' }], dropped: 1 }
+  }
+  const entries = []
+  let dropped = 0
+  for (let index = 0; index < list.length; index += 1) {
+    const checked = checkCustomEntry(list[index])
+    if (checked.ok) {
+      if (entries.length < CUSTOM_LIMITS.entries) entries.push(checked.entry)
+      continue
+    }
+    if (checked.error === 'incomplete') continue
+    dropped += 1
+    if (errors.length < CUSTOM_WARNINGS) errors.push({ index, error: checked.error, detail: checked.detail ?? '' })
+  }
+  if (list.length > CUSTOM_LIMITS.entries) {
+    errors.push({ index: -1, error: 'too-many-entries', detail: `只有前 ${CUSTOM_LIMITS.entries} 条生效` })
+  }
+  return { entries, errors, dropped }
+}
+
+/**
  * Reject anything that is not a small list of known kinds with a short value.
  * A bare `{ label, command }` written by an older version keeps working: it is
- * a shell entry.
+ * a shell entry. Unknown `kind` / `scope` are errors on every write path.
  */
 export function sanitizeCustomActions(value) {
   const list = Array.isArray(value) ? value : []
   if (list.length > CUSTOM_LIMITS.entries) throw new Error('too-many-entries')
-  const kept = []
-  for (const entry of list) {
-    const label = String(entry?.label ?? '').trim()
-    const rawKind = String(entry?.kind ?? 'shell').trim()
-    const kind = CUSTOM_KINDS.includes(rawKind) ? rawKind : 'shell'
-    const payload = String(entry?.value ?? entry?.command ?? '').trim()
-    if (label === '') continue
-    if (kind !== 'share' && payload === '') continue
-    if (label.length > CUSTOM_LIMITS.label) throw new Error('label-too-long')
-    if (payload.length > CUSTOM_LIMITS.value) throw new Error('value-too-long')
-    if (/[\u0000-\u001f]/u.test(label + payload)) throw new Error('control-character')
-    const rawScope = String(entry?.scope ?? 'all').trim()
-    const scope = CUSTOM_SCOPES.includes(rawScope) ? rawScope : 'all'
-    kept.push({ label, kind, value: payload, scope })
+  const { entries, errors } = inspectCustomActions(list)
+  const fatal = errors.find((item) => item.error !== 'bad-shape')
+  if (fatal !== undefined) throw new Error(fatal.error)
+  return entries
+}
+
+/**
+ * Pick the stored entry a click means. With one action per label this is the
+ * old behavior; a repeated label must name its `scope`, otherwise the caller is
+ * told the choice is ambiguous instead of silently getting another file class.
+ */
+export function selectCustomAction(actions, label, scope) {
+  const wantedLabel = String(label ?? '')
+  const wantedScope = scope === undefined || scope === null ? '' : String(scope).trim()
+  const same = (Array.isArray(actions) ? actions : []).filter((entry) => entry.label === wantedLabel)
+  const scopes = same.map((entry) => String(entry.scope ?? 'all'))
+  if (wantedScope !== '') {
+    const exact = same.find((entry) => String(entry.scope ?? 'all') === wantedScope)
+    if (exact === undefined) return { ok: false, error: 'not-configured', scopes }
+    return { ok: true, entry: exact }
   }
-  return kept
+  if (same.length === 0) return { ok: false, error: 'not-configured', scopes }
+  if (same.length > 1) return { ok: false, error: 'ambiguous', scopes }
+  return { ok: true, entry: same[0] }
+}
+
+/**
+ * Remove by identity. `labels` keeps the old "drop every entry with this
+ * label"; `items: [{ label, scope? }]` removes exactly the named identity and
+ * reports `not-configured` / `ambiguous` instead of guessing.
+ */
+export function removeCustomActions(actions, request = {}) {
+  const list = Array.isArray(actions) ? actions : []
+  const items = Array.isArray(request.items) ? request.items : null
+  if (items === null) {
+    const labels = new Set((Array.isArray(request.labels) ? request.labels : []).map((label) => String(label)))
+    return { ok: true, actions: list.filter((entry) => !labels.has(entry.label)) }
+  }
+  const doomed = new Set()
+  for (const item of items) {
+    const selected = selectCustomAction(list, item?.label, item?.scope)
+    if (selected.ok !== true) return selected
+    doomed.add(actionIdentity(selected.entry))
+  }
+  return { ok: true, actions: list.filter((entry) => !doomed.has(actionIdentity(entry))) }
 }
 
 /** Fill the placeholders the user may put in a command. */
@@ -745,11 +842,71 @@ function showSharePanel(path, paths) {
     }
   }
   const child = spawn('osascript', ['-l', 'JavaScript', paths.script, path], { detached: true, stdio: 'ignore' })
+  /* 没有 error 监听时 ENOENT 会变成未捕获事件，把整个插件带走。 */
+  child.on('error', () => dropChild(child, 'active'))
   child.unref()
   activeShare = child
   child.on('exit', () => dropChild(child, 'active'))
 }
 
+/** Early-exit window for shell-like launches: a bad command shows up here. */
+const LAUNCH_RECEIPT_MS = 1500
+
+/** Turn one failed launch into the detail the CLI and the HTTP layer report. */
+export function launchFailure(result) {
+  if (typeof result?.exitCode === 'number') return { code: result.exitCode, detail: `子进程退出码 ${result.exitCode}` }
+  return { detail: describeFailure(result) }
+}
+
+/**
+ * Start one detached helper and report what actually happened. Every child gets
+ * an `error` listener before anything else: a missing executable must never
+ * become an uncaught event. Shell-like launches wait out the early-exit window,
+ * so a typo comes back with its exit code instead of a fake success.
+ */
+function spawnDetached(command, args, options = {}, settleOnExit = false) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(command, args, { detached: true, stdio: 'ignore', ...options })
+    } catch (error) {
+      resolve({ ok: false, error })
+      return
+    }
+    let settled = false
+    let timer = null
+    const finish = (outcome) => {
+      if (settled) return
+      settled = true
+      if (timer !== null) clearTimeout(timer)
+      resolve(outcome)
+    }
+    child.once('error', (error) => finish({ ok: false, error }))
+    if (settleOnExit) {
+      timer = setTimeout(() => finish({ ok: true, started: true }), LAUNCH_RECEIPT_MS)
+      child.once('exit', (code) => {
+        if (typeof code === 'number' && code !== 0) finish({ ok: false, exitCode: code })
+        else finish({ ok: true, started: true })
+      })
+    } else {
+      child.once('spawn', () => finish({ ok: true, started: true }))
+      child.once('exit', (code) => {
+        if (typeof code === 'number' && code !== 0) finish({ ok: false, exitCode: code })
+      })
+    }
+    try {
+      child.unref()
+    } catch (ignored) {
+      /* already gone */
+    }
+  })
+}
+
+/**
+ * Run one custom action and resolve its receipt. `ok: true` means the launcher
+ * started; `ok: false` carries the early exit code or the spawn error, so no
+ * caller can report a typo as a success. Invalid state still throws.
+ */
 export async function runCustomAction(entry, target = {}) {
   const path = String(target.path ?? '')
   const folder = path === '' ? '' : dirname(path)
@@ -759,46 +916,38 @@ export async function runCustomAction(entry, target = {}) {
     if (path === '') throw new Error('service-needs-file')
     const helper = await ensureShareHelper()
     if (!helper.ok) throw new Error(helper.reason ?? 'share-unavailable')
-    spawn('osascript', ['-l', 'JavaScript', helper.script, '--service', entry.value, path], {
-      detached: true,
-      stdio: 'ignore'
-    }).unref()
-    return
+    return await spawnDetached('osascript', ['-l', 'JavaScript', helper.script, '--service', entry.value, path])
   }
   if (entry.kind === 'share') {
     if (path === '') throw new Error('share-needs-file')
     const helper = await ensureShareHelper()
     if (!helper.ok) throw new Error(helper.reason ?? 'share-unavailable')
     showSharePanel(path, shareHelperPaths())
-    return
+    return { ok: true, started: true }
   }
   if (entry.kind === 'shortcut') {
     if (platform !== 'darwin') throw new Error('shortcut-needs-macos')
     if (path === '') throw new Error('shortcut-needs-file')
-    spawn('shortcuts', ['run', entry.value, '-i', path], { detached: true, stdio: 'ignore' }).unref()
-    return
+    return await spawnDetached('shortcuts', ['run', entry.value, '-i', path])
   }
   if (entry.kind === 'url') {
     const open = customUrl(entry.value, target)
-    if (platform === 'win32') spawn(`start "" ${quoteArgument(open, 'win32')}`, { shell: true, detached: true, stdio: 'ignore' }).unref()
-    else spawn('open', [open], { detached: true, stdio: 'ignore' }).unref()
-    return
+    if (platform === 'win32') return await spawnDetached(`start "" ${quoteArgument(open, 'win32')}`, [], { shell: true })
+    return await spawnDetached('open', [open])
   }
   if (entry.kind === 'app') {
     const where = path !== '' ? path : folder
     if (where === '') throw new Error('app-needs-file')
-    if (platform === 'win32') spawn(`start "" ${quoteArgument(entry.value, 'win32')} ${quoteArgument(where, 'win32')}`, { shell: true, detached: true, stdio: 'ignore' }).unref()
-    else spawn('open', ['-a', entry.value, where], { detached: true, stdio: 'ignore' }).unref()
-    return
+    if (platform === 'win32') return await spawnDetached(`start "" ${quoteArgument(entry.value, 'win32')} ${quoteArgument(where, 'win32')}`, [], { shell: true })
+    return await spawnDetached('open', ['-a', entry.value, where])
   }
   if (entry.kind === 'powershell' || entry.kind === 'pwsh') {
     if (path === '' && /\{path\}|\{dir\}|\{name\}/u.test(entry.value)) throw new Error('powershell-needs-file')
     const { executable, args } = powershellCommand(entry, target, platform)
-    spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref()
-    return
+    return await spawnDetached(executable, args, { windowsHide: true }, true)
   }
   const command = customCommand(entry.value, target)
-  spawn(command, { shell: true, detached: true, stdio: 'ignore', windowsHide: false }).unref()
+  return await spawnDetached(command, [], { shell: true, windowsHide: false }, true)
 }
 
 /** Read one JSON body; the route only ever accepts small payloads. */
@@ -817,7 +966,12 @@ async function readJsonBody(req, limit = 64 * 1024) {
 export async function loadCustomActions(file) {
   try {
     const text = await readFile(file, 'utf8')
-    return sanitizeCustomActions(JSON.parse(text))
+    const inspected = inspectCustomActions(JSON.parse(text))
+    if (inspected.errors.length > 0 || inspected.dropped > 0) {
+      const shown = inspected.errors.slice(0, 3).map((item) => `${item.index}:${item.error}`).join(' ')
+      trace(`config-warning ${file}: ${shown}${inspected.dropped > shown.length ? ` +${inspected.dropped}` : ''}`)
+    }
+    return inspected.entries
   } catch {
     return []
   }
@@ -942,7 +1096,7 @@ export function apply(ctx) {
           const current = body?.replace === true ? [] : await loadCustomActions(file)
           const merged = [...current]
           for (const entry of incoming) {
-            const index = merged.findIndex((item) => item.label === entry.label)
+            const index = merged.findIndex((item) => actionIdentity(item) === actionIdentity(entry))
             if (index >= 0) merged[index] = entry
             else merged.push(entry)
           }
@@ -953,12 +1107,18 @@ export function apply(ctx) {
         }
         if (action === 'actions-remove') {
           const body = await readJsonBody(req)
-          const labels = new Set((Array.isArray(body?.labels) ? body.labels : []).map((label) => String(label)))
           const file = customActionsFile()
-          const kept = (await loadCustomActions(file)).filter((entry) => !labels.has(entry.label))
-          await saveCustomActions(file, kept)
-          trace(`actions-removed ${[...labels].join(',')}`)
-          return reply(res, 200, { ok: true, actions: kept })
+          const removal = removeCustomActions(await loadCustomActions(file), body ?? {})
+          if (removal.ok !== true) {
+            return reply(res, removal.error === 'ambiguous' ? 409 : 404, {
+              ok: false,
+              error: removal.error,
+              scopes: removal.scopes
+            })
+          }
+          await saveCustomActions(file, removal.actions)
+          trace(`actions-removed ${removal.actions.length}`)
+          return reply(res, 200, { ok: true, actions: removal.actions })
         }
         if (action === 'actions-save') {
           const body = await readJsonBody(req)
@@ -974,16 +1134,30 @@ export function apply(ctx) {
         if (action === 'actions-run') {
           const body = await readJsonBody(req)
           const label = String(body?.label ?? '')
-          const direct = body?.kind === 'share' ? { label: '发送到…', kind: 'share', value: '' } : null
+          const rawScope = body?.scope === undefined || body?.scope === null ? '' : String(body.scope).trim()
+          if (rawScope !== '' && !CUSTOM_SCOPES.includes(rawScope)) {
+            return reply(res, 400, { ok: false, error: 'unknown-scope', scopes: [...CUSTOM_SCOPES] })
+          }
+          const direct = body?.kind === 'share' ? { label: '发送到…', kind: 'share', value: '', scope: 'all' } : null
           const actions = await loadCustomActions(customActionsFile())
-          /* 同名入口可能分属不同类别：先认 scope，再退回到第一条同名。 */
-          const wantScope = body?.scope === undefined ? '' : String(body.scope)
-          const same = actions.filter((entry) => entry.label === label)
-          const chosen = direct ?? same.find((entry) => wantScope !== '' && (entry.scope ?? 'all') === wantScope) ?? same[0]
-          if (chosen === undefined) return reply(res, 404, { ok: false, error: 'not-configured' })
-          await runCustomAction(chosen, { path: body?.path, url: body?.url })
-          trace(`action-ran ${chosen.label}`)
-          return reply(res, 200, { ok: true })
+          /* 唯一同名按 label 认；同名多条必须带 scope，绝不替用户挑另一类文件上的同名入口。 */
+          const chosen = direct ?? selectCustomAction(actions, label, rawScope)
+          if (chosen.ok !== true) {
+            return reply(res, chosen.error === 'ambiguous' ? 409 : 404, {
+              ok: false,
+              error: chosen.error,
+              scopes: chosen.scopes,
+              available: [...CUSTOM_SCOPES]
+            })
+          }
+          const outcome = await runCustomAction(chosen.entry, { path: body?.path, url: body?.url })
+          if (outcome?.ok !== true) {
+            const failure = launchFailure(outcome)
+            trace(`action-launch-failed ${chosen.entry.label} ${failure.detail}`)
+            return reply(res, 500, { ok: false, error: 'launch-failed', ...failure })
+          }
+          trace(`action-ran ${chosen.entry.label}`)
+          return reply(res, 200, { ok: true, started: true })
         }
         if (action !== 'reveal') {
           return reply(res, 400, { ok: false, error: 'unknown action' })
