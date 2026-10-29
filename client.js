@@ -243,6 +243,10 @@ window.__ModuleLoader__.load({
       candidate = stripLineSuffix(candidate);
       if (prose === true) candidate = proseCandidatePath(candidate);
       if (!/^(?:[A-Za-z]:[\\/]?|[\\/]{1,2})$/u.test(candidate)) candidate = candidate.replace(/[\\/]+$/u, "");
+      /* Expand before validating, so every caller keeps the guarantee that a
+         value leaving this layer is absolute while tilde chips stop being
+         dropped on the floor. */
+      candidate = expandHomePath(candidate);
       return looksAbsolute(candidate) ? candidate : null;
     }
 
@@ -1209,6 +1213,27 @@ window.__ModuleLoader__.load({
 
     var customActions = [];
     var customLoaded = false;
+    /** Home published by actions-get, used to expand a tilde path into a real one. */
+    var homePath = null;
+
+    /**
+     * `~` / `~/x` → an absolute path under home, using home's own
+     * separator so a Windows home never comes out as `C:\a/.dsh/x`.
+     * Until actions-get lands the value is returned untouched, which makes the
+     * caller's absolute check reject it — the same "nothing happens" this fix
+     * removes, but only for the first few milliseconds after the plugin mounts.
+     */
+    function expandHomePath(value) {
+      if (typeof value !== "string" || value === "") return value;
+      if (value !== "~" && value.charAt(0) !== "~") return value;
+      if (value !== "~" && value.charAt(1) !== "/" && value.charAt(1) !== "\\") return value;
+      if (homePath === null) return value;
+      var base = homePath.replace(/[\\/]+$/u, "");
+      if (value === "~") return base;
+      var separator = base.indexOf("\\") !== -1 && base.indexOf("/") === -1 ? "\\" : "/";
+      var rest = value.slice(2).replace(/[\\/]+/gu, separator);
+      return rest === "" ? base : base + separator + rest;
+    }
 
     function routeUrl(action) {
       return "/chat-link-actions?action=" + encodeURIComponent(action);
@@ -1236,6 +1261,7 @@ window.__ModuleLoader__.load({
         var changed = JSON.stringify(next) !== JSON.stringify(customActions);
         customActions = next;
         customLoaded = true;
+        if (typeof data.home === "string" && data.home !== "") homePath = data.home;
         if (changed) report("actions-loaded " + String(customActions.length));
       }, function (error) {
         customLoaded = true;
@@ -2154,6 +2180,8 @@ window.__ModuleLoader__.load({
     testSeams.pickerCurrent = pickerCurrent;
     testSeams.KIND_LIST = function () { return PURPOSE_ORDER.slice(); };
     testSeams.setRootContext = function (value) { rootContext = value === undefined ? null : value; };
+    testSeams.expandHomePath = expandHomePath;
+    testSeams.setHome = function (value) { homePath = value === undefined ? null : value; };
     module.exports = {};
     module.exports.inject = inject;
     module.exports.apply = apply;

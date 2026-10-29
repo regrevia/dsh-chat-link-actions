@@ -26,13 +26,37 @@ function isAbsoluteFor(path, platform = process.platform) {
   return platform === 'win32' ? pathWin32.isAbsolute(path) : isAbsolute(path)
 }
 
+/** The separator the home value itself uses, so a Windows home stays Windows. */
+function separatorOf(home) {
+  return home.includes('\\') && !home.includes('/') ? '\\' : '/'
+}
+
+/**
+ * `~` / `~/x` / `~\x` → a real path under the given home.
+ *
+ * DSH renders `~/.dsh/...` as a local file link (its own classifier
+ * only rejects a `?` query and non-drive schemes), so a transcript ends
+ * up full of chips whose only address is a tilde path. Refusing those means
+ * right-click does nothing at all.
+ */
+export function expandHome(value, home = homedir()) {
+  if (typeof value !== 'string' || value === '') return value
+  if (value !== '~' && !value.startsWith('~/') && !value.startsWith('~\\')) return value
+  const base = home.replace(/[\\/]+$/u, '')
+  if (value === '~') return base
+  const separator = separatorOf(home)
+  const rest = value.slice(2).replace(/[\\/]+/gu, separator)
+  return rest === '' ? base : `${base}${separator}${rest}`
+}
+
 /** Paths that are not a local file on this machine cannot be revealed. */
-export function requireAbsolute(path, platform = process.platform) {
+export function requireAbsolute(path, platform = process.platform, home = homedir()) {
   if (typeof path !== 'string' || path === '' || path.includes('\0')) {
     throw new Error('absolute path required')
   }
-  if (!isAbsoluteFor(path, platform)) throw new Error('absolute path required')
-  return path
+  const expanded = expandHome(path, home)
+  if (!isAbsoluteFor(expanded, platform)) throw new Error('absolute path required')
+  return expanded
 }
 
 /**
@@ -854,6 +878,9 @@ export function optionalMember(ctx, name) {
 async function trace(line) {
   try {
     const file = join(homedir(), '.dsh', 'logs', 'chat-link-actions.log')
+    /* The directory usually does not exist yet: without this the append fails
+       with ENOENT, the catch swallows it, and every diagnostic goes silent. */
+    await mkdir(dirname(file), { recursive: true })
     const info = await stat(file).catch(() => null)
     if (info !== null && info.size > 131072) return
     await appendFile(file, `${new Date().toISOString()} ${line}\n`)
@@ -863,7 +890,7 @@ async function trace(line) {
 }
 
 export function apply(ctx) {
-  trace('mounted 0.5.9')
+  trace('mounted 0.6.11')
   void ensureShareHelper().then((helper) => {
     if (helper.ok === true) warmShareHelper(shareHelperPaths())
   }).catch(() => {})
@@ -927,7 +954,13 @@ export function apply(ctx) {
           return reply(res, 200, { ok: true })
         }
         if (action === 'actions-get') {
-          return reply(res, 200, { ok: true, actions: await loadCustomActions(customActionsFile()) })
+          return reply(res, 200, {
+            ok: true,
+            actions: await loadCustomActions(customActionsFile()),
+            /* Lets the client half expand a tilde path before validating it;
+               reveal expands on its own, so a stale client still lands right. */
+            home: homedir(),
+          })
         }
         if (action === 'actions-detect') {
           return reply(res, 200, { ok: true, targets: await detectTargets() })

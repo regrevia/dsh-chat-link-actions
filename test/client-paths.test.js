@@ -71,3 +71,40 @@ test('行号后缀与尾分隔符', () => {
   assert.equal(paths.withoutTrailingSeparator('/tmp/a/'), '/tmp/a')
   assert.equal(paths.withoutTrailingSeparator('/'), '/')
 })
+
+test('~ 路径：home 到手后展开成绝对路径，没到手时仍然拒绝', () => {
+  paths.setHome(null)
+  /* 认不出来也不能把 '~/a' 当路径交出去：这一层只交付绝对路径。 */
+  assert.equal(paths.normalizeStrict('~/a.md'), null)
+
+  paths.setHome('C:\\Users\\example')
+  /* DSH 把 \`~/.dsh/...\` 渲染成芯片，title 里就是这条波浪号路径。 */
+  assert.equal(paths.normalizeStrict('~/.dsh/logs/a.log'), 'C:\\Users\\example\\.dsh\\logs\\a.log')
+  assert.equal(paths.normalizeStrict('@~/work/notes.md'), 'C:\\Users\\example\\work\\notes.md')
+  assert.equal(paths.normalizeStrict('~'), 'C:\\Users\\example')
+
+  /* POSIX home 走正斜杠，不跟着运行平台走。 */
+  paths.setHome('/home/example')
+  assert.equal(paths.normalizeStrict('~/.dsh/logs/a.log'), '/home/example/.dsh/logs/a.log')
+
+  /* 别人家的 home、波浪号开头的普通文件名都不算。 */
+  assert.equal(paths.normalizeStrict('~someone/a.md'), null)
+  assert.equal(paths.normalizeStrict('a~b/c.md'), null)
+  paths.setHome(null)
+})
+
+test('expandHomePath 只碰波浪号前缀，分隔符跟随 home', () => {
+  paths.setHome('/home/example')
+  assert.equal(paths.expandHomePath('~'), '/home/example')
+  assert.equal(paths.expandHomePath('~/x'), '/home/example/x')
+  assert.equal(paths.expandHomePath('~\\x'), '/home/example/x')
+  assert.equal(paths.expandHomePath('~x/y'), '~x/y')
+  assert.equal(paths.expandHomePath('C:\\a\\b.md'), 'C:\\a\\b.md')
+
+  paths.setHome('C:\\Users\\example')
+  assert.equal(paths.expandHomePath('~\\x'), 'C:\\Users\\example\\x')
+  assert.equal(paths.expandHomePath('~/a/b.md'), 'C:\\Users\\example\\a\\b.md')
+
+  paths.setHome(null)
+  assert.equal(paths.expandHomePath('~/x'), '~/x')
+})

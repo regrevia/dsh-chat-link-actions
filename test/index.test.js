@@ -413,3 +413,18 @@ test('协议里带 agent 配置入口', () => {
   assert.equal(ACTION_PROTOCOL.storage.file.endsWith('custom-actions.json'), true)
   assert.ok(ACTION_PROTOCOL.cli.some((line) => line.includes('apply')))
 })
+
+test('~ 路径：reveal 前展开成真实 home，分隔符跟随 home', () => {
+  /* 固定的 home，断言不依赖跑在哪台机器上（CI 三个平台都跑这组用例）。 */
+  assert.equal(requireAbsolute('~/.dsh/logs/a.log', 'linux', '/home/example'), '/home/example/.dsh/logs/a.log')
+  assert.equal(requireAbsolute('~/work/a.md', 'win32', 'C:\\Users\\example'), 'C:\\Users\\example\\work\\a.md')
+  assert.equal(requireAbsolute('~\\work\\a.md', 'win32', 'C:\\Users\\example'), 'C:\\Users\\example\\work\\a.md')
+  assert.equal(requireAbsolute('~', 'win32', 'C:\\Users\\example'), 'C:\\Users\\example')
+  /* 结尾多一个分隔符也不该拼出双斜杠。 */
+  assert.equal(requireAbsolute('~/a.md', 'linux', '/home/example/'), '/home/example/a.md')
+
+  /* 原样透传：绝对路径不受影响；别人家的 home、相对路径仍然拒绝。 */
+  assert.equal(requireAbsolute('C:\\a\\b.md', 'win32', 'C:\\Users\\example'), 'C:\\a\\b.md')
+  assert.throws(() => requireAbsolute('~someone/a.md', 'linux', '/home/example'), /absolute path required/)
+  assert.throws(() => requireAbsolute('a/b.md', 'linux', '/home/example'), /absolute path required/)
+})
