@@ -241,6 +241,21 @@ test('剪贴板图片统一转成 PNG，webp/jpeg 不再直接写进去', async 
   assert.equal((await paths.toPngBlob(svg)).type, 'image/png')
 })
 
+test('波浪号芯片：真实 title 走完整叶子层，右键不再静默 return', () => {
+  /* DSH 渲染成 <button data-ref-chip="file" title="@~/.dsh/logs/x.log">x.log</button> */
+  const chip = fakeNode('button', { 'data-ref-chip': 'file', title: '@~/.dsh/logs/x.log' }, { textContent: 'x.log' })
+  nest(chip, body)
+
+  paths.setHome('/home/example')
+  assert.equal(paths.pathFromNode(chip, null), '/home/example/.dsh/logs/x.log')
+  paths.setHome('C:\\Users\\example')
+  assert.equal(paths.pathFromNode(chip, null), 'C:\\Users\\example\\.dsh\\logs\\x.log')
+
+  /* home 还没到：宁可没有菜单，也不把 '~/...' 当绝对路径交出去。 */
+  paths.setHome(null)
+  assert.equal(paths.pathFromNode(chip, null), null)
+})
+
 test('自定义入口失败按原因说话，不都说剪贴板不可用', () => {
   const words = { actionNeedsFile: '文件', managerFailed: '失败' }
   assert.equal(paths.customFailureText(new Error('app-needs-file'), words), '文件')

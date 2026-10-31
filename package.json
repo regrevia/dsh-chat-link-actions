@@ -1,6 +1,6 @@
 {
   "name": "dsh-chat-link-actions",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "description": "Right-click any attachment or path in the DSH transcript and hand it to your own action: send it to a WeChat contact, open it in Chrome, or whatever you configure. One right-click, any entry point; menus are drawn in the app's own style, never the system one.",
   "type": "module",
   "main": "index.js",

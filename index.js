@@ -15,6 +15,15 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { dirname, isAbsolute, win32 as pathWin32 } from 'node:path'
 
+/** Version stamped into diagnostics; tests keep it equal to package.json. */
+export const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
+  } catch {
+    return 'unknown'
+  }
+})()
+
 /** Services required before mounting: route registration + the web runtime fence. */
 export const inject = ['webServer', 'connection']
 
@@ -898,7 +907,7 @@ async function trace(line) {
 }
 
 export function apply(ctx) {
-  trace('mounted 0.6.11')
+  trace(`mounted ${PKG_VERSION}`)
   void ensureShareHelper().then((helper) => {
     if (helper.ok === true) warmShareHelper(shareHelperPaths())
   }).catch(() => {})
