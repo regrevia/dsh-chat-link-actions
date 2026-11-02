@@ -1,9 +1,9 @@
 {
-  "version": 3,
+  "version": 4,
   "storage": {
     "file": "~/.dsh/chat-link-actions/custom-actions.json",
-    "shape": "{ \"version\": 1, \"actions\": [ { \"label\": string, \"kind\": Kind, \"value\": string, \"scope\": Scope } ] }",
-    "note": "菜单与 CLI 共用这个文件。写完 5 秒内界面自己刷新，不用重启、不用刷新页面。没有 scope 的旧条目按 all 处理。"
+    "shape": "[ { \"label\": string, \"kind\": Kind, \"value\": string, \"scope\": Scope } ]",
+    "note": "裸数组，不是 {version, actions}。菜单与 CLI 共用这个文件。写完 5 秒内界面自己刷新，不用重启、不用刷新页面。没有 scope 的条目按 all 处理；kind 或 scope 写错会被拒绝（不再悄悄改成 shell / all），文件读不动或 JSON 损坏时报错并保留原文件。"
   },
   "limits": {
     "entries": 20,

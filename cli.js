@@ -6,13 +6,19 @@
  */
 import {
   ACTION_PROTOCOL,
+  CUSTOM_KINDS,
   CUSTOM_SCOPES,
+  actionIdentity,
   customActionsFile,
   detectTargets,
+  inspectCustomActions,
+  launchFailure,
   loadCustomActions,
+  removeCustomActions,
   runCustomAction,
   sanitizeCustomActions,
-  saveCustomActions
+  saveCustomActions,
+  selectCustomAction
 } from './index.js'
 import { readFileSync } from 'node:fs'
 
@@ -34,7 +40,33 @@ function parse(argv) {
 }
 
 async function read() {
-  return loadCustomActions(customActionsFile())
+  try {
+    return await loadCustomActions(customActionsFile())
+  } catch (error) {
+    throw new Error(explainConfigError(error))
+  }
+}
+
+/** 配置读不动时给一句能照着做的话，不要只吐错误码。 */
+function explainConfigError(error) {
+  const code = String(error?.message ?? error)
+  const file = customActionsFile()
+  if (code === 'config-corrupt') return `入口配置坏了：${file}。改好 JSON 或删掉它再试（没动过原文件）`
+  if (code === 'config-unreadable') return `读不了入口配置：${file}。看一眼文件权限再试`
+  return code
+}
+
+/** One sentence for "which one did you mean": the caller must be able to fix it. */
+function explainSelection(label, picked) {
+  const scopes = Array.isArray(picked?.scopes) && picked.scopes.length > 0 ? picked.scopes.join(' / ') : '（没有同名入口）'
+  if (picked?.error === 'ambiguous') return `「${label}」有多个同名入口：${scopes}。用 --scope 指定要操作哪一个`
+  return `没有这条入口：${label}（已有 scope：${scopes}）。可用 scope：${CUSTOM_SCOPES.join(' / ')}`
+}
+
+function requireScope(scope) {
+  if (scope === undefined || scope === '') return ''
+  if (!CUSTOM_SCOPES.includes(scope)) throw new Error(`不认识的 --scope：${scope}。可用：${CUSTOM_SCOPES.join(' / ')}`)
+  return scope
 }
 
 async function write(actions) {
@@ -56,12 +88,13 @@ try {
     const label = flags.label ?? words[0]
     const kind = flags.kind ?? words[1] ?? 'shell'
     const value = flags.value ?? words.slice(2).join(' ') ?? ''
-    const scope = flags.scope ?? 'all'
+    const scope = requireScope(flags.scope ?? 'all') || 'all'
     if (label === undefined || label === '') throw new Error('缺少 --label')
-    if (!CUSTOM_SCOPES.includes(scope)) throw new Error(`不认识的 --scope：${scope}。可用：${CUSTOM_SCOPES.join(' / ')}`)
+    if (!CUSTOM_KINDS.includes(kind)) throw new Error(`不认识的 --kind：${kind}。可用：${CUSTOM_KINDS.join(' / ')}`)
     const current = await read()
-    const index = current.findIndex((entry) => entry.label === label)
+    /* 身份是 (label, scope)：同名但不同 scope 是两条，同名同 scope 才覆盖。 */
     const entry = { label, kind, value, scope }
+    const index = current.findIndex((item) => actionIdentity(item) === actionIdentity(entry))
     if (index >= 0) current[index] = entry
     else current.push(entry)
     console.log(JSON.stringify(await write(current), null, 2))
@@ -79,32 +112,46 @@ try {
     const current = flags.replace === 'true' ? [] : await read()
     const merged = current.slice()
     for (const entry of sanitizeCustomActions(incoming)) {
-      const index = merged.findIndex((item) => item.label === entry.label)
+      const index = merged.findIndex((item) => actionIdentity(item) === actionIdentity(entry))
       if (index >= 0) merged[index] = entry
       else merged.push(entry)
     }
     console.log(JSON.stringify(await write(merged), null, 2))
   } else if (command === 'validate') {
     const raw = flags.json ?? (flags.file !== undefined ? readFileSync(flags.file, 'utf8') : '[]')
-    let list = []
+    let parsed
     try {
-      const parsed = JSON.parse(String(raw))
-      list = Array.isArray(parsed) ? parsed : parsed.actions
+      parsed = JSON.parse(String(raw))
     } catch (error) {
       throw new Error('JSON 解析失败：' + String(error?.message ?? error))
     }
-    console.log(JSON.stringify({ ok: true, entries: sanitizeCustomActions(list) }, null, 2))
+    /* 结构错误非零退出；坏条目逐条列出，不写成「ok: true」。 */
+    const inspected = inspectCustomActions(parsed)
+    const ok = inspected.errors.length === 0
+    console.log(JSON.stringify({ ok, entries: inspected.entries, errors: inspected.errors }, null, 2))
+    if (!ok) process.exitCode = 1
   } else if (command === 'remove') {
-    const labels = new Set(words.length > 0 ? words : [flags.label ?? ''])
-    const kept = (await read()).filter((entry) => !labels.has(entry.label))
-    console.log(JSON.stringify(await write(kept), null, 2))
+    const label = flags.label ?? words[0]
+    if (label === undefined || label === '') throw new Error('缺少要删除的 label')
+    const scope = requireScope(flags.scope)
+    const current = await read()
+    const request = scope === '' ? { labels: words.length > 0 ? words : [label] } : { items: [{ label, scope }] }
+    const removal = removeCustomActions(current, request)
+    if (removal.ok !== true) throw new Error(explainSelection(label, removal))
+    console.log(JSON.stringify(await write(removal.actions), null, 2))
   } else if (command === 'run') {
     const label = flags.label ?? words[0]
+    if (label === undefined || label === '') throw new Error('缺少要运行的 label')
+    const scope = requireScope(flags.scope)
     const actions = await read()
-    const chosen = actions.find((entry) => entry.label === label)
-    if (chosen === undefined) throw new Error(`没有这条入口：${String(label)}`)
-    await runCustomAction(chosen, { path: flags.path, url: flags.url })
-    console.log(`已执行 ${chosen.label}（${chosen.kind}）`)
+    const picked = selectCustomAction(actions, label, scope === '' ? undefined : scope)
+    if (picked.ok !== true) throw new Error(explainSelection(label, picked))
+    const outcome = await runCustomAction(picked.entry, { path: flags.path, url: flags.url })
+    if (outcome?.ok !== true) {
+      const failure = launchFailure(outcome)
+      throw new Error(`启动失败：${failure.detail}${typeof failure.code === 'number' ? `（退出码 ${failure.code}）` : ''}`)
+    }
+    console.log(`已执行 ${picked.entry.label}（${picked.entry.kind}）`)
   } else {
     throw new Error(`不认识的命令：${command}。可用：protocol / list / detect / apply / validate / add / remove / run`)
   }

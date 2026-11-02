@@ -63,21 +63,26 @@ test('空文件时只挡住用到文件占位符的脚本', () => {
 
 /** 装了对应可执行文件才真跑；没装就跳过，CI 上没有 pwsh 也不会假成功。 */
 function runPowerShell(kind) {
-  const { executable, args } = powershellCommand(kind, {}, process.platform)
+  /* 生产里 powershellCommand 收的是整条入口，这里也按入口传，别绕过 { kind } 分支。 */
+  const { executable, args } = powershellCommand({ kind, value: '' }, {}, process.platform)
   const probe = spawnSync(executable, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' })
   if (probe.error || probe.status !== 0) return null
-  return (script) => spawnSync(executable, [...args.slice(0, 5), script], { encoding: 'utf8' })
+  return {
+    executable,
+    script: (text) => spawnSync(executable, [...args.slice(0, 5), text], { encoding: 'utf8' })
+  }
 }
 
 for (const kind of ['powershell', 'pwsh']) {
   test(`${kind}：真跑一段脚本，把中文/空格/$ 的路径原样写出来`, (t) => {
     const run = runPowerShell(kind)
     if (!run) return t.skip(`${kind} 不可用`)
+    assert.ok(run.executable.toLowerCase().includes(kind), `用到的是 ${run.executable}，不是 ${kind}`)
     const dir = mkdtempSync(join(tmpdir(), 'dcla-ps-'))
     try {
       const target = join(dir, "中文 目录, 100% it's $env:PATH.txt")
       const entry = { kind, value: "Set-Content -LiteralPath {path} -Value 'ok' -NoNewline" }
-      const result = run(powershellCommand(entry, { path: target }, process.platform).args.at(-1))
+      const result = run.script(powershellCommand(entry, { path: target }, process.platform).args.at(-1))
       assert.equal(result.status, 0, result.stderr)
       assert.equal(readFileSync(target, 'utf8'), 'ok')
     } finally {
