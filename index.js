@@ -1282,7 +1282,12 @@ export function apply(ctx) {
         if (!outcome.ok) return reply(res, 500, { ok: false, error: 'launch-failed' })
         return reply(res, 200, { ok: true })
       } catch (error) {
-        return reply(res, 400, { ok: false, error: String(error?.message ?? error) })
+        const code = String(error?.message ?? error)
+        /* 配置文件坏了是本机的状态，不是请求写错：给 500 和文件位置，别混进 400。 */
+        if (code === 'config-corrupt' || code === 'config-unreadable') {
+          return reply(res, 500, { ok: false, error: code, file: customActionsFile() })
+        }
+        return reply(res, 400, { ok: false, error: code })
       }
     },
   }), 'dsh-chat-link-actions: reveal route')
