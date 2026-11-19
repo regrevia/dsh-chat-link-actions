@@ -137,6 +137,8 @@ test('站内相对链接补成可复制的绝对地址', () => {
   assert.equal(paths.linkTarget(new ElementStub('A', { href: '/attachments/v1/a.pdf' })), 'http://127.0.0.1:50937/attachments/v1/a.pdf')
   assert.equal(paths.linkTarget(new ElementStub('A', { href: 'https://x.test/p' })), 'https://x.test/p')
   assert.equal(paths.linkTarget(new ElementStub('A', { href: 'mailto:a@b.c' })), null)
+  assert.equal(paths.linkTarget(new ElementStub('VIDEO', { src: '/media/v.mp4' })), 'http://127.0.0.1:50937/media/v.mp4')
+})
 
 /* linkTarget 只认 http(s)，邮件地址由单独一层认，不能混进路径。 */
 test('邮箱地址整形与识别', () => {
@@ -172,8 +174,6 @@ test('邮件地址上右键给出复制与发信两项', () => {
   const items = panel.children.filter((child) => child.className === 'dcla-item')
   assert.equal(captions.length, 0, '邮箱不该顶一行路径说明')
   assert.equal(items.length, 2, '复制邮箱 + 发信')
-})
-  assert.equal(paths.linkTarget(new ElementStub('VIDEO', { src: '/media/v.mp4' })), 'http://127.0.0.1:50937/media/v.mp4')
 })
 
 test("菜单里用到的图标都画得出来", async () => {
