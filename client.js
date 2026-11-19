@@ -384,6 +384,74 @@ window.__ModuleLoader__.load({
 
     var PATH_IN_TEXT = /(?:^|[\s"'“”「」()（）\[\]<>])(@?"?(?:\/|[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|~\/(?!\/))[^\s"'“”「」<>，。；：！？（）【】《》]*)/u;
 
+    /** 纯文本里的邮箱：路径正则不认 `@`，邮箱单独认一遍。 */
+    var EMAIL_IN_TEXT = /(?:^|[^\w.%+\-@])([A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+)/u;
+
+    /** 把候选串整形成邮箱；不是邮箱就返回 null。 */
+    function normalizeEmail(value) {
+      if (typeof value !== "string") return null;
+      var text = value.trim();
+      if (text === "") return null;
+      text = text.replace(/^mailto:/iu, "").split("?")[0];
+      text = text.replace(/^["'“”「」<>()（）\[\]【】《》]+/u, "").replace(/["'“”「」<>,，。；：！？、()（）\[\]【】《》。]+$/u, "");
+      if (text.length > 254) return null;
+      return /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+$/u.test(text) ? text : null;
+    }
+
+    /** 元素自身或祖先上的 mailto: 链接。`absoluteUrl` 只认 http，故单算。 */
+    function emailTarget(node) {
+      for (var el = node; el !== null && el !== undefined && el !== document.body; el = el.parentElement) {
+        if (el.nodeType !== 1) continue;
+        var href = el.getAttribute("href");
+        if (typeof href !== "string") continue;
+        if (!/^mailto:/iu.test(href.trim())) continue;
+        var candidate = normalizeEmail(href.trim());
+        if (candidate !== null) return candidate;
+      }
+      return null;
+    }
+
+    /** 点击位置那段文字里的邮箱地址。 */
+    function emailFromCaret(x, y) {
+      var range = null;
+      try {
+        range = document.caretRangeFromPoint(x, y);
+      } catch (error) {
+        return null;
+      }
+      if (range === null || range.startContainer === null || range.startContainer.nodeType !== 3) return null;
+      var node = range.startContainer;
+      var data = node.data;
+      var offset = Math.min(range.startOffset, data.length);
+      var lead = 0;
+      for (var back = 0, walker = node; back < 2; back += 1) {
+        walker = walker.previousSibling;
+        if (walker === null || walker.nodeType !== 3) break;
+        lead += walker.data.length;
+      }
+      if (lead > 0) {
+        var merged = "";
+        for (var step = 0, cursor = node; step < 2; step += 1) {
+          cursor = cursor.previousSibling;
+          if (cursor === null || cursor.nodeType !== 3) break;
+          merged = cursor.data + merged;
+        }
+        data = merged + data;
+        offset += lead;
+      }
+      var matcher = new RegExp(EMAIL_IN_TEXT.source, "gu");
+      var hit = null;
+      while ((hit = matcher.exec(data)) !== null) {
+        var captured = hit[1];
+        if (captured === undefined) captured = hit[0];
+        var candidate = normalizeEmail(captured);
+        var start = hit.index + hit[0].length - captured.length;
+        if (candidate !== null && offset >= start && offset <= start + captured.length) return candidate;
+        if (hit[0].length === 0) matcher.lastIndex += 1;
+      }
+      return null;
+    }
+
     /** 一段词像不像同一路径的下一段：不以分隔符或盘符开头，也不带句子标点。 */
     function continuesPath(word) {
       if (word === "" || /^[\/"'\u201c\u201d\u300c\u300d<>]/u.test(word)) return false;
@@ -969,6 +1037,10 @@ window.__ModuleLoader__.load({
         imageCaption: "图片",
         copyLink: "复制链接",  // ui-copy-ignore
         copiedLink: "已复制链接",  // ui-copy-ignore
+        copyEmail: "复制邮箱",  // ui-copy-ignore
+        copiedEmail: "已复制邮箱",  // ui-copy-ignore
+        mailTo: "用邮件 App 发信",
+        mailFailed: "没能打开邮件 App",
         copyName: "复制文件名",  // ui-copy-ignore
         copiedName: "已复制文件名",  // ui-copy-ignore
         customize: "自定义入口…",  // ui-copy-ignore
@@ -1009,6 +1081,10 @@ window.__ModuleLoader__.load({
         imageCaption: "Image",
         copyLink: "Copy link",  // ui-copy-ignore
         copiedLink: "Link copied",  // ui-copy-ignore
+        copyEmail: "Copy email",  // ui-copy-ignore
+        copiedEmail: "Email copied",  // ui-copy-ignore
+        mailTo: "Send with Mail",
+        mailFailed: "Could not open the mail app",
         copyName: "Copy file name",  // ui-copy-ignore
         copiedName: "File name copied",  // ui-copy-ignore
         customize: "Customize actions…",  // ui-copy-ignore
@@ -1665,6 +1741,7 @@ window.__ModuleLoader__.load({
       var url = settings.url === undefined || settings.url === null ? null : String(settings.url);
       var hasPath = path !== null && path !== undefined;
       var cardName = settings.name === undefined || settings.name === null ? null : String(settings.name);
+      var email = settings.email === undefined || settings.email === null ? null : String(settings.email);
       var kind = kindOfTarget({ path: hasPath ? path : null, name: cardName });
       var items = [];
       if (image !== null) {
@@ -1717,6 +1794,18 @@ window.__ModuleLoader__.load({
           }, function () {
             toast(strings().clipboardFailed);
           });
+        } });
+      }
+      if (email !== null) {
+        items.push({ id: "copyEmail", label: strings().copyEmail, icon: "copy", run: function () {
+          navigator.clipboard.writeText(email).then(function () {
+            toast(strings().copiedEmail);
+          }, function () {
+            toast(strings().clipboardFailed);
+          });
+        } });
+        items.push({ id: "mailTo", label: strings().mailTo, icon: "share", run: function () {
+          openMail(email);
         } });
       }
       if (hasPath || url !== null) {
@@ -1786,6 +1875,21 @@ window.__ModuleLoader__.load({
         toastNode = null;
         toastTimer = null;
       }, 1400);
+    }
+
+    /** 交给系统默认邮件 App：`mailto:` 由宿主浏览器转出去，不上报成败。 */
+    function openMail(email) {
+      try {
+        var link = document.createElement("a");
+        link.setAttribute("href", "mailto:" + email);
+        link.setAttribute("rel", "noopener");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        toast(strings().revealPending);
+      } catch (error) {
+        toast(strings().mailFailed);
+      }
     }
 
     /** 当前会话提供的应用服务；没有会话时返回空。 */
@@ -2069,12 +2173,17 @@ window.__ModuleLoader__.load({
       var url = null;
       try { image = imageTarget(target); } catch (ignored) { image = null; }
       try { url = image === null ? linkTarget(target) : null; } catch (ignored) { url = null; }
+      var email = null;
+      try { email = emailTarget(target); } catch (ignored) { email = null; }
+      if (email === null) {
+        try { email = emailFromCaret(event.clientX, event.clientY); } catch (ignored) { email = null; }
+      }
       try {
         path = image === null ? pathFromNode(target, { x: event.clientX, y: event.clientY, allowProse: true }) : imageFilePath(image);
       } catch (ignored) { path = null; }
       if (path !== null && !looksLikePath(path)) path = null;
-      var options = { inField: false, image: null, url: url };
-      return { path: path, url: url, options: options };
+      var options = { inField: false, image: null, url: url, email: email };
+      return { path: path, url: url, email: email, options: options };
     }
 
     function onContextMenu(event) {
@@ -2086,6 +2195,11 @@ window.__ModuleLoader__.load({
         var image = imageTarget(target);
         var imageUrl = image === null ? null : imageSource(image);
         var url = imageUrl === null ? linkTarget(target) : outerLinkHref(target);
+        var email = null;
+        try { email = emailTarget(target); } catch (ignored) { email = null; }
+        if (email === null && !inField) {
+          try { email = emailFromCaret(event.clientX, event.clientY); } catch (ignored) { email = null; }
+        }
         proseCandidate = false;
         var path = null;
         var cardName = null;
@@ -2113,9 +2227,13 @@ window.__ModuleLoader__.load({
             }
           }
         }
-        report("ctx " + probeTag + " path=" + (path === null ? "null" : String(path).slice(0, 140)) + " img=" + (imageUrl === null ? "null" : String(imageUrl).slice(0, 100)) + " url=" + (url === null ? "null" : String(url).slice(0, 100)));
-        if (path === null && imageUrl === null && url === null && cardName === null) return;
-        if (path !== null && proseCandidate && !looksLikePath(path)) return;
+        report("ctx " + probeTag + " path=" + (path === null ? "null" : String(path).slice(0, 140)) + " img=" + (imageUrl === null ? "null" : String(imageUrl).slice(0, 100)) + " url=" + (url === null ? "null" : String(url).slice(0, 100)) + " email=" + (email === null ? "null" : email));
+        if (path === null && imageUrl === null && url === null && cardName === null && email === null) return;
+        if (path !== null && proseCandidate && !looksLikePath(path)) {
+          /* 邮箱不是路径，别被路径的严格闸门连带丢掉。 */
+          if (email === null) return;
+          path = null;
+        }
         var options = {};
         options.inField = inField;
         try { options.directory = directoryHint(target); } catch (ignored) { options.directory = undefined; }
@@ -2123,6 +2241,7 @@ window.__ModuleLoader__.load({
         options.image = imageUrl;
         options.url = url;
         options.name = cardName;
+        options.email = email;
         openMenu(path, event.clientX, event.clientY, options);
         event.preventDefault();
         event.stopPropagation();
@@ -2133,7 +2252,7 @@ window.__ModuleLoader__.load({
         /* 附加能力坏了也要给基础菜单：引用、定位、复制永远在。 */
         try {
           var bare = optionsForBareMenu(event);
-          if (bare.path !== null || bare.url !== null) {
+          if (bare.path !== null || bare.url !== null || bare.email !== null) {
             openMenu(bare.path, event.clientX, event.clientY, bare.options);
             event.preventDefault();
             event.stopPropagation();
@@ -2151,7 +2270,7 @@ window.__ModuleLoader__.load({
     var inject = ["slots", "sessions", "remote", "remote.session"];
 
     function apply(ctx) {
-      report("ready 0.7.0");
+      report("ready 0.7.1");
       rootContext = ctx;
       refreshCustomActions();
       ctx.effect(function () {
@@ -2192,6 +2311,9 @@ window.__ModuleLoader__.load({
     testSeams.joinPathWords = joinPathWords;
     testSeams.stripLineSuffix = stripLineSuffix;
     testSeams.looksLikePath = looksLikePath;
+    testSeams.normalizeEmail = normalizeEmail;
+    testSeams.emailTarget = emailTarget;
+    testSeams.emailFromCaret = emailFromCaret;
     testSeams.withoutTrailingSeparator = withoutTrailingSeparator;
     testSeams.editableField = editableField;
     testSeams.contextMenu = onContextMenu;

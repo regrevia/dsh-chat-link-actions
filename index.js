@@ -1115,7 +1115,12 @@ async function trace(line) {
        with ENOENT, the catch swallows it, and every diagnostic goes silent. */
     await mkdir(dirname(file), { recursive: true })
     const info = await stat(file).catch(() => null)
-    if (info !== null && info.size > 131072) return
+    /* Rotate instead of dropping: a full log used to swallow every later line,
+       so a healthy plugin looked like it had never mounted. */
+    if (info !== null && info.size > 131072) {
+      const stamp = new Date().toISOString().replace(/[-:]/gu, '').replace(/\..+$/u, '')
+      await rename(file, `${file}.${stamp}`).catch(() => null)
+    }
     await appendFile(file, `${new Date().toISOString()} ${line}\n`)
   } catch (ignored) {
     /* diagnostics must never take the plugin down */

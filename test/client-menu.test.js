@@ -137,6 +137,42 @@ test('站内相对链接补成可复制的绝对地址', () => {
   assert.equal(paths.linkTarget(new ElementStub('A', { href: '/attachments/v1/a.pdf' })), 'http://127.0.0.1:50937/attachments/v1/a.pdf')
   assert.equal(paths.linkTarget(new ElementStub('A', { href: 'https://x.test/p' })), 'https://x.test/p')
   assert.equal(paths.linkTarget(new ElementStub('A', { href: 'mailto:a@b.c' })), null)
+
+/* linkTarget 只认 http(s)，邮件地址由单独一层认，不能混进路径。 */
+test('邮箱地址整形与识别', () => {
+  assert.equal(paths.normalizeEmail('yc@regevia.com'), 'yc@regevia.com')
+  assert.equal(paths.normalizeEmail('mailto:yc@regevia.com'), 'yc@regevia.com')
+  assert.equal(paths.normalizeEmail('mailto:yc@regevia.com?subject=hi'), 'yc@regevia.com')
+  assert.equal(paths.normalizeEmail('（yc@regevia.com）'), 'yc@regevia.com')
+  assert.equal(paths.normalizeEmail('yc@regevia.com。'), 'yc@regevia.com')
+  assert.equal(paths.normalizeEmail('yc@regevia'), null, '顶级域名缺失不算邮箱')
+  assert.equal(paths.normalizeEmail('/Users/apple/a.md'), null)
+  assert.equal(paths.normalizeEmail(''), null)
+  assert.equal(paths.normalizeEmail(null), null)
+})
+
+test('mailto 链接被认成邮件收件人', () => {
+  assert.equal(paths.emailTarget(new ElementStub('A', { href: 'mailto:yc@regevia.com' })), 'yc@regevia.com')
+  const child = new ElementStub('SPAN')
+  const anchor = new ElementStub('A', { href: 'mailto:yc@regevia.com' })
+  anchor.appendChild(child)
+  child.parentElement = anchor
+  assert.equal(paths.emailTarget(child), 'yc@regevia.com', '子元素里点也要认到链接')
+  assert.equal(paths.emailTarget(new ElementStub('A', { href: 'https://x.test/p' })), null)
+})
+
+test('邮件地址上右键给出复制与发信两项', () => {
+  const anchor = new ElementStub('A', { href: 'mailto:yc@regevia.com' })
+  const event = makeEvent(anchor)
+  assert.doesNotThrow(() => paths.contextMenu(event))
+  assert.equal(event.defaultPrevented, true, notes.join(' | '))
+  const layer = sandbox.document.body.children[0]
+  const panel = layer.children[0]
+  const captions = panel.children.filter((child) => child.className === 'dcla-path')
+  const items = panel.children.filter((child) => child.className === 'dcla-item')
+  assert.equal(captions.length, 0, '邮箱不该顶一行路径说明')
+  assert.equal(items.length, 2, '复制邮箱 + 发信')
+})
   assert.equal(paths.linkTarget(new ElementStub('VIDEO', { src: '/media/v.mp4' })), 'http://127.0.0.1:50937/media/v.mp4')
 })
 
